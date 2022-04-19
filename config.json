@@ -1,0 +1,17 @@
+{
+	"cfi-framework": {
+		"pre-compiled": false,
+		"source": "./check_routines.s",
+		"source-type": "asm",
+		"compiler": "arm-none-eabi-as",
+		"compile-args": "-g3 -gdwarf-2 -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=softfp",
+		"output-file": "/Users/jonas.jelonek/simplicity_workspace/mrfs_math/GNU ARM v10.2.1 - Debug/check_routines.o",
+		"function-return-assignment": "_cfi_check_ra"
+	},
+	"process-targets": {
+		"files": [
+			"/Users/jonas.jelonek/simplicity_workspace/mrfs_math/GNU ARM v10.2.1 - Debug/app.o"
+		],
+		"skip_invalid": false
+	}
+}
