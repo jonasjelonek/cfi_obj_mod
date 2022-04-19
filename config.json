@@ -13,5 +13,19 @@
 			"/Users/jonas.jelonek/simplicity_workspace/mrfs_math/GNU ARM v10.2.1 - Debug/app.o"
 		],
 		"skip_invalid": false
+	},
+	"instrumentalization": {
+		"bx_lr": true,
+		"pop_encoding_t1": true,
+		"pop_encoding_t2": true,
+		"pop_encoding_t3": true,
+		"xor_in_prolog": false
+	},
+	"post-processing": {
+		"auto-link": false,
+		"files": [ ],
+		"linker-cmd": "",
+		"linker-script": "",
+		"link-args": ""
 	}
 }
