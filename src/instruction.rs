@@ -1,15 +1,17 @@
 use std::ops::Not;
 
+use json::parse;
+
 use crate::common::*;
 use crate::elf::{
 	Endianness
 };
 
 /* tuple: (mask, signature) */
-pub const BX_LR: (u16, u16) = (0xffff, 0x4770);
-pub const POP_T1: (u16, u16) = (0xff00, 0xbd00);
-pub const POP_T2: (u32, u32) = (0xa000_ffff, 0x8000_e8bd);
-pub const POP_T3: (u32, u32) = (0xffff_ffff, 0xfb04_f85d);
+pub const BX_LR: (u16, u16, &'static str) = (0xffff, 0x4770, "bx");
+pub const POP_T1: (u16, u16, &'static str) = (0xff00, 0xbd00, "pop");
+pub const POP_T2: (u32, u32, &'static str) = (0xa000_ffff, 0x8000_e8bd, "ldmia.w");
+pub const POP_T3: (u32, u32, &'static str) = (0xffff_ffff, 0xfb04_f85d, "ldr.w");
 
 #[derive(Debug)]
 pub enum Instruction {
@@ -196,6 +198,31 @@ pub fn is_return(data: &[u8], endian: Endianness) -> Option<ReturnType> {
 		},
 		_ => print_err_panic!("Byte slice has invalid length for return operation."),
 	}
+}
+
+pub fn verify_is_return_and_not_data(data: &[u8], position: u32, parsed_type: ReturnType, disassembly_lines: &Vec<&str>, endian: Endianness) -> bool {
+	let offset_str = format!("{:x}", position);
+	for line in disassembly_lines {
+		if !(line.contains(offset_str.as_str())) { continue; }
+
+		let instr_str = match data.len() {
+			2 => format!("{:02x}{:02x}", data[1], data[0]),
+			4 => format!("{:02x}{:02x} {:02x}{:02x}", data[1], data[0], data[3], data[2]),
+			_ => return false,
+		};
+		if !(line.contains(instr_str.as_str())) { continue; }
+
+		let mnemonic = match parsed_type {
+			ReturnType::Bxlr => BX_LR.2,
+			ReturnType::PopT1 => POP_T1.2,
+			ReturnType::PopT2 => POP_T2.2,
+			ReturnType::PopT3 => POP_T3.2,
+		};
+		if !(line.contains(mnemonic)) { continue; }
+
+		return true;
+	}
+	false
 }
 
 pub fn adjust_instruction(opcode_data: &[u8], pos: usize, fsize: u32, shift_map: &Vec<(usize, usize)>) -> Option<([u8; 4], bool)> {

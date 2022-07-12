@@ -1325,7 +1325,7 @@ impl From<SymbolVisibility> for u8 {
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct SymbolIndex(pub u32);
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, PartialOrd)]
 pub struct Symbol32 {
 	pub st_name: u32,
 	pub st_value: u32,

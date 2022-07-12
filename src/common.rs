@@ -38,7 +38,7 @@ impl ToolchainOperation {
 	}
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ReturnType {
 	Bxlr,
 	PopT1,

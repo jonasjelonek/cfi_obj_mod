@@ -10,7 +10,7 @@
 	},
 	"process-targets": {
 		"files": [
-			"/Users/jonas.jelonek/simplicity_workspace/mrfs_math/GNU ARM v10.2.1 - Debug/app.o"
+			"/Users/jonas.jelonek/Desktop/app.o"
 		],
 		"skip_invalid": false
 	},

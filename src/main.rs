@@ -28,6 +28,10 @@ use crate::elf::{
 	SymbolKind, RelocationTable32, SectionHeader32, SectionKind
 };
 
+const CFI_CHECKCODE_NAME: &'static str = "_cfi_check_ra";
+const NOPN: [u8; 2] = [ 0x00, 0xbf ];
+const BW_PLACEHOLDER: [u8; 4] = [ 0xff, 0xf7, 0xfe, 0xbf ];
+
 fn main() {
 	let args: Vec<String> = env::args().collect();
 	let cfg: config::WorkflowConfig = config::parse_cfg_file(&args[1]);
@@ -87,20 +91,18 @@ fn process_target(path: &PathBuf) -> () {
 	let endian = obj_file.endian().unwrap();
 	if let Some(symtab) = &mut obj_file.symbol_table {
 		for section in obj_file.sections.iter_mut() {
-			if section.name.contains(".text") {
+			if section.name.starts_with(".text") {
 				if section.header.sh_size < 2 {
 					print_skip!("Skipping section '{}' because it is too small!", section.name);
 					continue;
 				}
 
 				print_ok!("Processing section '{}' with idx {}", section.name, section.idx.0);
-				
-				find_and_handle_returns_in_section(section, symtab, endian);
+				find_and_handle_returns_in_section(section, symtab, endian, path.to_str().unwrap());
 			}
 		}
 	}
 
-	//let save_path = PathBuf::from("/Users/jonas.jelonek/Desktop/output.elf");
 	print_ok!("Writing to file: {}", &path.to_str().unwrap());
 
 	start = Instant::now();
@@ -108,8 +110,8 @@ fn process_target(path: &PathBuf) -> () {
 	print_ok!("Wrote file in {} msecs", start.elapsed().as_secs_f64() * 1000f64);
 }
 
-fn add_checkroutine_symbol(symtab: &mut SymbolTable32) -> SymbolIndex {
-	let symbol_name = "_cfi_check_ra".to_string();
+fn add_or_get_checkroutine_symbol(symtab: &mut SymbolTable32) -> SymbolIndex {
+	let symbol_name = CFI_CHECKCODE_NAME.to_string();
 	if let Some(s) = symtab.symbols.iter().find(|sym| sym.name == symbol_name) {
 		s.idx
 	} else {
@@ -121,22 +123,25 @@ fn add_checkroutine_symbol(symtab: &mut SymbolTable32) -> SymbolIndex {
 			st_other: SymbolVisibility::Default.into(), 
 			st_shndx: SectionIndex(elf::constants::SHN_UNDEF as u32), 
 			name: symbol_name, 
-			idx: SymbolIndex(0),		// Can be 0, will be determined dynamically by add_symbol 
+			idx: SymbolIndex(0),		/* Can be 0, will be determined dynamically by add_symbol */
 		})
 	}	
 }
 
-fn find_and_handle_returns_in_section(section: &mut Section32, symtab: &mut SymbolTable32, endian: Endianness) -> () {
-	const NOPN: [u8; 2] = [ 0x00, 0xbf ];
-	const BW_PLACEHOLDER: [u8; 4] = [ 0xff, 0xf7, 0xfe, 0xbf ];
-
-	let checkroutine_symbol: SymbolIndex = add_checkroutine_symbol(symtab);
-	print_ok!("Added symbol for checkroutine: {}", checkroutine_symbol.0);
+fn find_and_handle_returns_in_section(section: &mut Section32, symtab: &mut SymbolTable32, endian: Endianness, file_path: &str) -> () {
+	let checkroutine_symbol: SymbolIndex = add_or_get_checkroutine_symbol(symtab);
 	let mut funcs: Vec<&mut Symbol32> = symtab.symbols.iter_mut()
+		/* consider type 'None' also to have them in the list for modifications */
 		.filter(|s| { s.st_shndx == section.idx && (s.kind() == SymbolKind::Function || s.kind() == SymbolKind::None) })
 		.collect::<Vec<&mut Symbol32>>();
 	let mut num_of_returns: u32 = 0;
 
+	let mut objdump_cmd = std::process::Command::new("arm-none-eabi-objdump");
+	objdump_cmd.args([ "-j", section.name.as_str(), "-d", file_path]);
+	let disassembly = String::from_utf8(objdump_cmd.output().unwrap().stdout).unwrap();
+	let disassembly_lines = disassembly.lines().collect::<Vec<&str>>();
+
+	funcs.sort_by(|a, b| a.partial_cmp(&b).unwrap());
 	for f_idx in 0..funcs.len() {
 		if funcs[f_idx].kind() != SymbolKind::Function { continue; }
 
@@ -144,86 +149,88 @@ fn find_and_handle_returns_in_section(section: &mut Section32, symtab: &mut Symb
 		let func_start: u32 = funcs[f_idx].st_value - 1;
 		let mut pos: u32 = 0;
 
-'byteloop: 
 		while pos < (func_start + funcs[f_idx].st_size) {
 			let pos_cast: usize = pos as usize;
+			//println!("pos is {}, section len is {}, func_start is {}, func_end is {}", pos, section.data.len(), func_start, func_start + funcs[f_idx].st_size);
 			let bytes: &[u8] = match true {
-				_a if (section.data.len() - pos_cast) >= 4 => &section.data[pos_cast..=(pos_cast + 3)],
-				_b if (section.data.len() - pos_cast) >= 2 => &section.data[pos_cast..=(pos_cast + 1)],
+				_ if (section.data.len() - pos_cast) >= 4 => &section.data[pos_cast..=(pos_cast + 3)],
+				_ if (section.data.len() - pos_cast) >= 2 => &section.data[pos_cast..=(pos_cast + 1)],
 				_ => { pos += 2; continue }
 			};
 
 			match instruction::is_return(bytes, endian) {
 				Some(x) => {
+					/*if !instruction::verify_is_return_and_not_data(bytes, section.header.sh_addr + pos, 
+							x, &disassembly_lines, endian) 
+					{
+						print_hint!("Found return which is not a real return at address {}", section.header.sh_addr + pos);
+						pos += 2;
+						continue;
+					}*/
+
 					num_of_returns += 1;
 					print_ok!("Found return in '{}' at offset {} of type {:?}", section.name, pos, x);
+
 					let cfi_call_pos = pos;
+					let old_sect_data_len: usize = section.data.len();
+					let mut addend: u32 = 0;
+					let mut forward: u32 = 2;
+
 					match x {
 						ReturnType::Bxlr => {
 							section.data[pos_cast] = BW_PLACEHOLDER[0];
 							section.data[pos_cast + 1] = BW_PLACEHOLDER[1];
-							if (pos_cast + 2) != section.data.len() && [ section.data[pos_cast + 2], section.data[pos_cast + 3] ] == NOPN {
+							if (pos_cast + 3) != section.data.len() && [ section.data[pos_cast + 2], section.data[pos_cast + 3] ] == NOPN {
 								section.data[pos_cast + 2] = BW_PLACEHOLDER[2];
 								section.data[pos_cast + 3] = BW_PLACEHOLDER[3];
+								forward = 4;
 							} else {
-								// Add NOPN to ensure function_size % 4 == 0
 								if funcs[f_idx].st_size > 2 {
+									/* Add NOPN to ensure function_size % 4 == 0, thus 4-byte aligned functions */
 									section.data.splice((pos_cast + 2)..(pos_cast + 2), [ BW_PLACEHOLDER[2], BW_PLACEHOLDER[3], NOPN[0], NOPN[1] ] );
-									funcs[f_idx].st_size += 4;
-									shift_map.push( (pos_cast + 2, 4) );
-								} else {
+									addend = 4;
+								} else { /* Allow 2-byte long functions */
 									section.data.splice((pos_cast + 2)..(pos_cast + 2), [ BW_PLACEHOLDER[2], BW_PLACEHOLDER[3] ] );
-									funcs[f_idx].st_size += 2;
-									shift_map.push( (pos_cast + 2, 2) );
+									addend = 2;
 								}
+								forward = 2 + addend;
 							}
-
-							// Need to adjust offsets of subsequent functions
-							((f_idx + 1)..funcs.len()).for_each(|i| funcs[i].st_value += 2);
-							pos += 6;
 						},
 						ReturnType::PopT1 => {
-							// Need to make T2 out of T1 because we need to specify LR.
+							// make T2 out of T1 to be able to specify LR.
 							if (pos_cast + 3) < section.data.len() && [ section.data[pos_cast + 2], section.data[pos_cast + 3] ] == NOPN {
-								funcs[f_idx].st_size += 4;
-								shift_map.push( (pos_cast + 2, 4) );
-
 								instruction::modify_popt1(&mut section.data[pos_cast..=(pos_cast + 3)]);
 								section.data.splice((pos_cast + 4)..(pos_cast + 4), BW_PLACEHOLDER);
+								addend = 4;
 							} else {
 								section.data.splice((pos_cast + 2)..(pos_cast + 2), [ 0x00, 0x00 ]);
-
-								funcs[f_idx].st_size += 8;
-								shift_map.push( (pos_cast + 2, 8) );
-
 								instruction::modify_popt1(&mut section.data[pos_cast..=(pos_cast + 3)]);
 								section.data.splice((pos_cast + 4)..(pos_cast + 4), [ &BW_PLACEHOLDER[..], &NOPN[..] ].concat());
+								addend = 8;
 							}
-							
-							// Need to adjust offsets of subsequent functions 
-							((f_idx + 1)..funcs.len()).for_each(|i| funcs[i].st_value += 6);
-							pos += 8;
+							forward = 8;
 						}, 
 						ReturnType::PopT2 => {
 							instruction::modify_popt2(&mut section.data[pos_cast..(pos_cast + 4)]);
 							section.data.splice((pos_cast + 4)..(pos_cast + 4), BW_PLACEHOLDER);
-							
-							shift_map.push( (pos_cast + 2, 4) );
-							// Need to adjust size and the offsets of subsequent functions
-							funcs[f_idx].st_size += 4;
-							((f_idx + 1)..funcs.len()).for_each(|i| funcs[i].st_value += 4);
-							pos += 8;
+
+							addend = 4;
+							forward = 8;
 						},
 						ReturnType::PopT3 => {
 							instruction::modify_popt3(&mut section.data[pos_cast..(pos_cast + 4)]);
 							section.data.splice((pos_cast + 4)..(pos_cast + 4), BW_PLACEHOLDER);
 
-							shift_map.push( (pos_cast + 2, 4) );
-							// Need to adjust size and the offsets of subsequent functions
-							funcs[f_idx].st_size += 4;
-							pos += 8;
+							addend = 4;
+							forward = 8;
 						}
 					}
+					if addend != 0 {
+						shift_map.push( (pos_cast + 2, addend as usize) );
+						funcs[f_idx].st_size += addend;
+						((f_idx + 1)..funcs.len()).for_each(|i| funcs[i].st_value += addend);	/* subsequent symbols */
+					}
+					pos += forward;
 
 					if let Some(relo_table) = &mut section.relocations {
 						relo_table.add_relocation(Relocation32 {
@@ -236,14 +243,12 @@ fn find_and_handle_returns_in_section(section: &mut Section32, symtab: &mut Symb
 							r_offset: if x == ReturnType::Bxlr { cfi_call_pos } else { cfi_call_pos + 4 },
 							r_info: ((elf::constants::R_ARM_THM_JUMP24 as u32) | ((checkroutine_symbol.0 as u32) << 8)) as u32,
 						});
-
 						section.relocations = Some(relo_table);
 					}
 				},
 				None => { pos += 2; continue }
 			}
 		}
-
 		if shift_map.len() == 0 { continue; }
 
 		// Adjust all instructions with relative adressing
@@ -257,15 +262,14 @@ fn find_and_handle_returns_in_section(section: &mut Section32, symtab: &mut Symb
 				if wide {
 					section.data[pos + 2] = opcode[2];
 					section.data[pos + 3] = opcode[3];
-					pos += 4;
-				} else { pos += 2; }
-			} else {
-				pos += 2;
+					pos += 2;
+				}
 			}
+			pos += 2;
 		}
 
 		// Adjust offsets of consecutive symbols and data symbols within the function
-		let size_growth = shift_map.iter().fold(0, |acc, elem| acc + elem.1);
+		/*let size_growth = shift_map.iter().fold(0, |acc, elem| acc + elem.1);
 		for j in 0..funcs.len() {
 			if funcs[j].kind() == SymbolKind::None && funcs[j].st_value > 0 && funcs[j].st_value < (func_start + funcs[f_idx].st_size) {
 				let old_st_value = funcs[j].st_value;
@@ -276,13 +280,8 @@ fn find_and_handle_returns_in_section(section: &mut Section32, symtab: &mut Symb
 						break;
 					}
 				}
-			} else {
-				if funcs[j].st_value <= funcs[f_idx].st_value {
-					continue;
-				}
-				funcs[j].st_value += size_growth as u32;
 			}
-		}
+		}*/
 
 		// Adjust all relocations pointing into the current function
 		if let Some(relotbl) = &mut section.relocations {
